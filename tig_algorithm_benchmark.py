@@ -54,6 +54,12 @@ def set_checkout(repo_name, branch_name):
     except subprocess.CalledProcessError as e:
         print("Error: ", e.output.decode('utf-8'))
 
+def get_closest_power_of_2(n):
+    p = 1
+    while p < n:
+        p *= 2
+    return p
+
 def main():
     parser = argparse.ArgumentParser(description="Benchmark TIG Worker algorithms")
     parser.add_argument("--log_file", default="tig_dataset_algorithms_benchmark.csv", help="Path to the log file")    
@@ -129,9 +135,10 @@ def main():
 
         difficulty = random.choice(difficults)   
         algo_start_time = int(datetime.now().timestamp() * 1000)
-        while remaining_nonces > 0 and (int(datetime.now().timestamp() * 1000) - algo_start_time) < (60*1000*3):
+        while remaining_nonces > 0 and (int(datetime.now().timestamp() * 1000) - algo_start_time) < (60*1000*60*4):
 
             nonces_to_compute = min(args.num_workers, remaining_nonces)
+            power_of_2 = get_closest_power_of_2(nonces_to_compute)
             start_time = int(datetime.now().timestamp() * 1000)
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
@@ -146,7 +153,7 @@ def main():
             command = [
                 tig_worker_path, "compute_batch", 
                 settings, "random_string", str(current_nonce), str(nonces_to_compute),
-                str(nonces_to_compute), wasm_file,
+                str(power_of_2), wasm_file,
                 "--workers", str(nonces_to_compute)
             ]
 
