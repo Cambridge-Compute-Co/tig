@@ -7,35 +7,6 @@ import subprocess
 from datetime import datetime
 import requests
 import random
-
-def get_repo_root():
-    try:
-        os.chdir(os.join("..", "tig-monorepo"))
-        # Run the command to get the top-level directory of the repository
-        repo_root = subprocess.check_output(
-            ['git', 'rev-parse', '--show-toplevel'],
-            stderr=subprocess.STDOUT
-        ).strip().decode('utf-8')
-        return repo_root
-    except subprocess.CalledProcessError as e:
-        print("Error: ", e.output.decode('utf-8'))
-        return None
-
-def get_branch_name():
-    try:
-        repo_root = get_repo_root()
-        # Run the command to get branch name on repo_root path
-        branch_name = subprocess.check_output(
-            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
-            stderr=subprocess.STDOUT,
-            cwd=repo_root
-        ).strip().decode('utf-8')
-
-        return branch_name
-
-    except subprocess.CalledProcessError as e:
-        print("Error: ", e.output.decode('utf-8'))
-        return None
     
 def set_checkout(repo_name, branch_name):
     try:
@@ -44,7 +15,11 @@ def set_checkout(repo_name, branch_name):
             stderr=subprocess.STDOUT,
             cwd=repo_name
         )
+        
+    except subprocess.CalledProcessError as e:
+        print(f"Error on checkout to branch '{branch_name}': ", e.output.decode('utf-8'))
 
+    try:
         subprocess.check_output(
             ['git', 'pull'],
             stderr=subprocess.STDOUT,
@@ -52,7 +27,9 @@ def set_checkout(repo_name, branch_name):
         )
 
     except subprocess.CalledProcessError as e:
-        print("Error: ", e.output.decode('utf-8'))
+        print("Error on pull from branch '{branch_name}': ", e.output.decode('utf-8'))
+        
+    return True
 
 def get_closest_power_of_2(n):
     p = 1
@@ -68,9 +45,8 @@ def main():
     parser.add_argument("--num_cpus", default=16, type=int, help="Number of CPUs (default: 4)")
     parser.add_argument("--start_nonce", default=1, type=int, help="Start nonce (default: 0)")
     parser.add_argument("--num_nonces", default=23040, type=int, help="Number of nonces")
-    parser.add_argument("--num_workers", default=16, type=int, help="Number of workers (default: 4)")
-    parser.add_argument("--challenges_name", default="[vector_search/invector_hybrid]", help="Challenges name (default: '[vector_search/invector_hybrid]')")
-    # parser.add_argument("--challenges_name", default="[satisfiability,vehicle_routing,knapsack,vector_search]", help="Challenge name (default: 'satisfiability')")
+    parser.add_argument("--challenges_name", default="[vehicle_routing/advanced_routing, knapsack/classic_quadkp, satisfiability/sat_global_opt, vector_search/invector_hybrid]", help="Challenges name (default: '[vector_search/invector_hybrid]')")
+    parser.add_argument("--max_minutes_per_algo", default=4, type=int, help="Max minutes per algorithm (default: 4)")
 
     args = parser.parse_args()
     
@@ -78,7 +54,7 @@ def main():
     tig_worker_path = os.path.join(REPO_TIG_MONOREPO, "target/release/tig-worker")
     
     if not os.path.isfile(tig_worker_path):
-        sys.exit("Error: tig-worker binary not found.")
+        sys.exit(f"Error: tig-worker binary '{tig_worker_path}' not found.")
     print(f"Found tig-worker binary at {tig_worker_path}")
         
     if not os.path.isfile(args.log_file):
@@ -91,10 +67,6 @@ def main():
                 "Invalid_Count", "Output_Stdout", "Output_Stderr"
             ])
     
-    remaining_nonces = args.num_nonces
-    current_nonce = args.start_nonce
-
-    
     challenge_ids = {
         "satisfiability": "c001",
         "vehicle_routing": "c002",
@@ -103,24 +75,31 @@ def main():
     }
 
     challenge_name_list = args.challenges_name.strip('[]').replace(" ", "").split(',')
+
+    response = requests.get("https://mainnet-api.tig.foundation/get-block")
+    if response.status_code != 200:
+        sys.exit(f"Error: Failed to get block data from API. Status code: {response.status_code}")
+    block_data = response.json()
+    block_id = block_data["block"]["id"]
+
+    response = requests.get(f"https://mainnet-api.tig.foundation/get-challenges?block_id={block_id}")
+    if response.status_code != 200:
+        sys.exit(f"Error: Failed to get challenges data from API. Status code: {response.status_code}")
+    challenges_data = response.json()
+
     for branch_name in challenge_name_list:
+    
+        remaining_nonces = args.num_nonces
+        current_nonce = args.start_nonce
+
         challenge, algorithm = str.split(branch_name, "/")
         challenge_id = challenge_ids.get(challenge)
-        if not challenge_id or not algorithm:
-            sys.exit(f"Error: Challenge '{branch_name}' or algorithm not found in the challenge_ids dictionary.")
+        if not challenge_id:
+            sys.exit(f"Error: Challenge '{challenge}' not found in the challenge_ids dictionary.")
 
-        set_checkout(REPO_TIG_MONOREPO, branch_name)
+        if not set_checkout(REPO_TIG_MONOREPO, branch_name):
+            sys.exit(f"Error: Failed to checkout to branch '{branch_name}'.")
 
-        response = requests.get("https://mainnet-api.tig.foundation/get-block")
-        if response.status_code != 200:
-            sys.exit(f"Error: Failed to get block data from API. Status code: {response.status_code}")
-        block_data = response.json()
-        block_id = block_data["block"]["id"]
-
-        response = requests.get(f"https://mainnet-api.tig.foundation/get-challenges?block_id={block_id}")
-        if response.status_code != 200:
-            sys.exit(f"Error: Failed to get challenges data from API. Status code: {response.status_code}")
-        challenges_data = response.json()
         challenge_data = next((c for c in challenges_data["challenges"] if c["id"] == challenge_id), None)
         if not challenge_data:
             sys.exit(f"Error: Challenge '{challenge}' not found in the API response.")
@@ -133,11 +112,11 @@ def main():
                 
         print(f"Testing algorithm: {algorithm} for challenge: {challenge}")
 
-        difficulty = random.choice(difficults)   
         algo_start_time = int(datetime.now().timestamp() * 1000)
-        while remaining_nonces > 0 and (int(datetime.now().timestamp() * 1000) - algo_start_time) < (60*1000*60*4):
+        while remaining_nonces > 0 and (int(datetime.now().timestamp() * 1000) - algo_start_time) < (60 * 1000 * args.max_minutes_per_algo):
+            difficulty = random.choice(difficults)   
 
-            nonces_to_compute = min(args.num_workers, remaining_nonces)
+            nonces_to_compute = min(args.num_cpus, remaining_nonces)
             power_of_2 = get_closest_power_of_2(nonces_to_compute)
             start_time = int(datetime.now().timestamp() * 1000)
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -154,7 +133,7 @@ def main():
                 tig_worker_path, "compute_batch", 
                 settings, "random_string", str(current_nonce), str(nonces_to_compute),
                 str(power_of_2), wasm_file,
-                "--workers", str(nonces_to_compute)
+                "--workers", str(args.num_cpus)
             ]
 
             result = subprocess.run(
@@ -181,9 +160,6 @@ def main():
                     duration, current_nonce, solutions_count, invalid_count, output_stdout, 
                     output_stderr
                 ])
-            
-            # os.remove(stdout_file)
-            # os.remove(stderr_file)
             
             current_nonce += nonces_to_compute
             remaining_nonces -= nonces_to_compute
